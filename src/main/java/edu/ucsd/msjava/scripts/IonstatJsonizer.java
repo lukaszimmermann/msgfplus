@@ -1,15 +1,12 @@
 package edu.ucsd.msjava.scripts;
 
-import edu.ucsd.msjava.msgf.Histogram;
-import edu.ucsd.msjava.msgf.Tolerance;
 import edu.ucsd.msjava.msscorer.NewRankScorer;
-import edu.ucsd.msjava.msscorer.NewScorerFactory;
-import edu.ucsd.msjava.msscorer.Partition;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.*;
 import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.*;
 
 /**
@@ -56,66 +53,6 @@ public final class IonstatJsonizer {
         return outputDir;
     }
 
-    private static JSONObject object(final Object... args) {
-        final JSONObject result = new JSONObject();
-        for (int i = 0; i < args.length - 1; i+=2) {
-            result.put(args[i].toString(), args[i+1]);
-        }
-        return result;
-    }
-
-    private static JSONObject toObj(final NewScorerFactory.SpecDataType dataType) {
-        return object(
-                "method", dataType.getActivationMethod().toString(),
-                "instType", dataType.getInstrumentType().toString(),
-                "enzyme", object(
-                        "name", dataType.getEnzyme().getName()
-                ),
-                "protocol", object(
-                        "name", dataType.getProtocol().getName(),
-                        "description", dataType.getProtocol().getDescription()
-                )
-        );
-    }
-
-    private static <T> T getMember(Object input, String field, Class<T> expectedClass) {
-        try {
-            Field f = input.getClass().getDeclaredField(field);
-            f.setAccessible(true);
-            return expectedClass.cast(f.get(input));
-        } catch (NoSuchFieldException | IllegalAccessException e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
-    private static JSONObject toObj(final Tolerance tolerance) {
-        return object(
-                "value", tolerance.getValue(),
-                "unit", tolerance.getUnit()
-        );
-    }
-
-    private static JSONObject toObj(final Histogram<Integer> chargeHist) {
-        JSONObject result = new JSONObject();
-        for (int i = chargeHist.minKey(); i <= chargeHist.maxKey(); ++i) {
-            result.put(String.valueOf(i), chargeHist.get(i));
-        }
-        return result;
-    }
-
-    private static JSONArray toArr(final Set<Partition> partitionSet) {
-        JSONArray result = new JSONArray();
-        for (final Partition partition: partitionSet) {
-            result.put(object(
-               "charge", partition.getCharge(),
-               "parentMass", partition.getParentMass(),
-                    "segIndex", partition.getSegNum()
-            ));
-        }
-        return result;
-    }
-
-
     private static Object toJson(final Object obj) {
         if (obj == null) {
             return JSONObject.NULL;
@@ -124,7 +61,13 @@ public final class IonstatJsonizer {
         if (isLeaf(obj)) {
             return obj;
         }
-        System.out.println(obj.getClass());
+
+        /*
+         * Maps will be transformed to Object
+         */
+        if (obj instanceof Map) {
+            return map((Map) obj);
+        }
 
         if (obj instanceof Object[]) {
             final Object[] items = (Object[]) obj;
@@ -146,14 +89,15 @@ public final class IonstatJsonizer {
 
     private static JSONObject object(final Object obj) {
         final JSONObject result = new JSONObject();
-        final Field[] fields = obj.getClass().getDeclaredFields();
-
+        final List<Field> nonStaticFields = getNonStaticFields(obj);
+        final List<String> clazzes = getClasses(obj);
         try {
-            for (final Field field : fields) {
+            for (final Field field : nonStaticFields) {
                 field.setAccessible(true);
                 final Object child = field.get(obj);
                 result.put(field.getName(), toJson(child));
             }
+            result.put("javaClasses", clazzes);
         } catch (final IllegalAccessException e) {
             throw new IllegalStateException(e);
         }
@@ -168,24 +112,47 @@ public final class IonstatJsonizer {
         return result;
     }
 
+    private static JSONObject map(final Map<?,?> input) {
 
-//    private static Object objectToJSON(final Object obj){
-//
-//        if (obj instanceof Object[]) {
+        final int size = input.size();
+        final List<Object> keys = new ArrayList<>(size);
+        final List<Object> values = new ArrayList<>(size);
+        for (final Map.Entry<?,?> entry : input.entrySet()) {
+            keys.add(entry.getKey());
+            values.add(entry.getValue());
+        }
+        final JSONObject result = new JSONObject();
+        result.put("keys", array(keys.iterator()));
+        result.put("values", array(values.iterator()));
+        return result;
+    }
 
-//
-//        // General object, recurse over fields
-//        final Field[] fields = obj.getClass().getDeclaredFields();
-//        for (final Field field : fields) {
-//            field.setAccessible(true);
-//            Object o = field.get(obj)
-//
-//        }
-//
-//    }
+    private static List<Field> getNonStaticFields(final Object o) {
 
+        // Collect non-static fields recursively until Object is encountered
+        final List<Field> result = new ArrayList<>();
+        Class<?> clazz = o.getClass();
+        while (clazz != Object.class) {
+            final Field[] fields = clazz.getDeclaredFields();
+            for (final Field field: fields) {
+                if ( ! Modifier.isStatic(field.getModifiers())) {
+                    result.add(field);
+                }
+            }
+            clazz = clazz.getSuperclass();
+        }
+        return result;
+    }
 
-
+    private static List<String> getClasses(final Object o) {
+        final List<String> result = new ArrayList<>();
+        Class<?> clazz = o.getClass();
+        while (clazz != Object.class) {
+            result.add(clazz.getCanonicalName());
+            clazz = clazz.getSuperclass();
+        }
+        return result;
+    }
 
     public static void main(final String[] args) {
         checkArguments(args);
@@ -195,37 +162,15 @@ public final class IonstatJsonizer {
         final File[] paramFiles = ionstatDir.listFiles(file -> file.getPath().endsWith("param"));
 
         for (final File paramsFile : paramFiles) {
-            final NewRankScorer scorer = new NewRankScorer(paramsFile.getAbsolutePath());
 
+            final NewRankScorer scorer = new NewRankScorer(paramsFile.getAbsolutePath());
             final JSONObject result = object(scorer);
 
-            // Write missing attributes
-            // TODO
-//
-//            // Build individual objects and attibutes
-//            final JSONObject dataType = toObj(scorer.getSpecDataType());
-//            final JSONObject mme = toObj(scorer.getMME());
-//            final boolean applyDeconvolution = scorer.applyDeconvolution();
-//            final double deconvolutionErrorTolerance = scorer.deconvolutionErrorTolerance();
-//            final JSONObject chargeHist = toObj(getMember(scorer, "chargeHist", Histogram.class));
-//            final JSONArray partitionSet = toArr(scorer.getParitionSet());
-//
             //  Write
             final String filename = outputDir.toPath().resolve(paramsFile.getName() + ".json").toString();
             System.out.println("Writing to " + filename);
             try (final Writer out = new FileWriter(filename)) {
-
                 result.write(out);
-
-//                object(
-//                        "dataType", dataType,
-//                        "mme", mme,
-//                        "applyDeconvolution", applyDeconvolution,
-//                        "deconvolutionErrorTolerance", deconvolutionErrorTolerance,
-//                        "chargeHist", chargeHist,
-//                        "partitionSet", partitionSet
-//                ).write(out);
-
             } catch (final IOException e) {
                 System.err.println("Error writing file!");
                 System.exit(4);
@@ -233,9 +178,3 @@ public final class IonstatJsonizer {
         }
     }
 }
-
-//
-//this.method = method;
-//        this.instType = instType;
-//        this.enzyme = enzyme;
-//        this.protocol = protocol;
